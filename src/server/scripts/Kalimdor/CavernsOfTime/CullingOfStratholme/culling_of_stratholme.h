@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2019 TrinityCore <https://www.trinitycore.org/>
+ * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -19,6 +19,8 @@
 #define CULLING_OF_STRATHOLME_H
 
 #include "CreatureAIImpl.h"
+
+struct Position;
 
 #define DataHeader "CS"
 #define CoSScriptName "instance_culling_of_stratholme"
@@ -82,8 +84,6 @@ uint32 constexpr EncounterCount = 5;
 *    - StratholmeNPCAIWrapper::CheckDespawn:                                                                            *
 *      - gets current instance state using GetData, then checks if we should despawn ourselves (bitmask check)          *
 \***********************************************************************************************************************/
-
-struct Position;
 
 // Note: These are bitmask values to allow combining, but only a single bit will ever be true in instance script
 enum COSProgressStates : uint32

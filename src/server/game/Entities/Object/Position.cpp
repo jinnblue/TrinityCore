@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2019 TrinityCore <https://www.trinitycore.org/>
+ * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -25,7 +25,7 @@
 #include <G3D/g3dmath.h>
 #include <sstream>
 
-bool Position::operator==(Position const& a)
+bool Position::operator==(Position const& a) const
 {
     return (G3D::fuzzyEq(a.m_positionX, m_positionX) &&
         G3D::fuzzyEq(a.m_positionY, m_positionY) &&
@@ -225,6 +225,6 @@ std::string WorldLocation::GetDebugInfo() const
 {
     std::stringstream sstr;
     MapEntry const* mapEntry = sMapStore.LookupEntry(m_mapId);
-    sstr << "MapID: " << m_mapId << " Map name: '" << (mapEntry ? mapEntry->name[sWorld->GetDefaultDbcLocale()] : "<not found>") <<"' " << Position::ToString();
+    sstr << "MapID: " << m_mapId << " Map name: '" << (mapEntry ? mapEntry->MapName[sWorld->GetDefaultDbcLocale()] : "<not found>") <<"' " << Position::ToString();
     return sstr.str();
 }

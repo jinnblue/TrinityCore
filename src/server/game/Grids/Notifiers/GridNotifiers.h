@@ -1,6 +1,5 @@
 /*
- * Copyright (C) 2008-2019 TrinityCore <https://www.trinitycore.org/>
- * Copyright (C) 2005-2009 MaNGOS <http://getmangos.com/>
+ * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -24,6 +23,7 @@
 #include "CreatureAI.h"
 #include "DynamicObject.h"
 #include "GameObject.h"
+#include "Group.h"
 #include "Player.h"
 #include "Spell.h"
 #include "SpellInfo.h"
@@ -122,10 +122,12 @@ namespace Trinity
         float i_distSq;
         uint32 team;
         Player const* skipped_receiver;
-        MessageDistDeliverer(WorldObject const* src, WorldPacket const* msg, float dist, bool own_team_only = false, Player const* skipped = nullptr)
+        bool required3dDist;
+        MessageDistDeliverer(WorldObject const* src, WorldPacket const* msg, float dist, bool own_team_only = false, Player const* skipped = nullptr, bool req3dDist = false)
             : i_source(src), i_message(msg), i_phaseMask(src->GetPhaseMask()), i_distSq(dist * dist)
             , team(0)
             , skipped_receiver(skipped)
+            , required3dDist(req3dDist)
         {
             if (own_team_only)
                 if (Player const* player = src->ToPlayer())
@@ -192,26 +194,27 @@ namespace Trinity
 
     // Generic base class to insert elements into arbitrary containers using push_back
     template<typename Type>
-    class ContainerInserter {
+    class ContainerInserter
+    {
         using InserterType = void(*)(void*, Type&&);
 
         void* ref;
         InserterType inserter;
 
-        // MSVC workaround
-        template<typename T>
-        static void InserterOf(void* ref, Type&& type)
-        {
-            static_cast<T*>(ref)->push_back(std::move(type));
-        }
-
     protected:
         template<typename T>
-        ContainerInserter(T& ref_) : ref(&ref_), inserter(&InserterOf<T>) { }
-
-        void Insert(Type type)
+        ContainerInserter(T& ref_) : ref(&ref_)
         {
-            inserter(ref, std::move(type));
+            inserter = [](void* containerRaw, Type&& object)
+            {
+                T* container = reinterpret_cast<T*>(containerRaw);
+                container->insert(container->end(), std::move(object));
+            };
+        }
+
+        void Insert(Type object)
+        {
+            inserter(ref, std::move(object));
         }
     };
 
@@ -676,7 +679,7 @@ namespace Trinity
                 if (!go->isSpawned())
                     return false;
 
-                float const dist = go->GetGOInfo()->spellFocus.dist / 2.f;
+                float const dist = go->GetGOInfo()->spellFocus.dist;
                 return go->IsWithinDistInMap(_caster, dist);
             }
 
@@ -736,11 +739,11 @@ namespace Trinity
     class NearestGameObjectEntryInObjectRangeCheck
     {
         public:
-            NearestGameObjectEntryInObjectRangeCheck(WorldObject const& obj, uint32 entry, float range) : i_obj(obj), i_entry(entry), i_range(range) { }
+            NearestGameObjectEntryInObjectRangeCheck(WorldObject const& obj, uint32 entry, float range, bool spawnedOnly = true) : i_obj(obj), i_entry(entry), i_range(range), i_spawnedOnly(spawnedOnly) { }
 
             bool operator()(GameObject* go)
             {
-                if (go->isSpawned() && go->GetEntry() == i_entry && go->GetGUID() != i_obj.GetGUID() && i_obj.IsWithinDistInMap(go, i_range))
+                if ((!i_spawnedOnly || go->isSpawned()) && go->GetEntry() == i_entry && go->GetGUID() != i_obj.GetGUID() && i_obj.IsWithinDistInMap(go, i_range))
                 {
                     i_range = i_obj.GetDistance(go);        // use found GO range as new range limit for next check
                     return true;
@@ -752,9 +755,35 @@ namespace Trinity
             WorldObject const& i_obj;
             uint32 i_entry;
             float  i_range;
+            bool   i_spawnedOnly;
 
             // prevent clone this object
             NearestGameObjectEntryInObjectRangeCheck(NearestGameObjectEntryInObjectRangeCheck const&) = delete;
+    };
+
+    // Success at unit in range, range update for next check (this can be use with GameobjectLastSearcher to find nearest unspawned GO)
+    class NearestUnspawnedGameObjectEntryInObjectRangeCheck
+    {
+    public:
+        NearestUnspawnedGameObjectEntryInObjectRangeCheck(WorldObject const& obj, uint32 entry, float range) : i_obj(obj), i_entry(entry), i_range(range) { }
+
+        bool operator()(GameObject* go)
+        {
+            if (!go->isSpawned() && go->GetEntry() == i_entry && go->GetGUID() != i_obj.GetGUID() && i_obj.IsWithinDistInMap(go, i_range))
+            {
+                i_range = i_obj.GetDistance(go);        // use found GO range as new range limit for next check
+                return true;
+            }
+            return false;
+        }
+
+    private:
+        WorldObject const& i_obj;
+        uint32 i_entry;
+        float  i_range;
+
+        // prevent clone this object
+        NearestUnspawnedGameObjectEntryInObjectRangeCheck(NearestUnspawnedGameObjectEntryInObjectRangeCheck const&) = delete;
     };
 
     // Success at unit in range, range update for next check (this can be use with GameobjectLastSearcher to find nearest GO with a certain type)
@@ -805,6 +834,27 @@ namespace Trinity
             uint32 i_hp;
     };
 
+    class MostHPPercentMissingInRange
+    {
+    public:
+        MostHPPercentMissingInRange(Unit const* obj, float range, uint32 minHpPct, uint32 maxHpPct) : i_obj(obj), i_range(range), i_minHpPct(minHpPct), i_maxHpPct(maxHpPct), i_hpPct(101.f) { }
+
+        bool operator()(Unit* u)
+        {
+            if (u->IsAlive() && u->IsInCombat() && !i_obj->IsHostileTo(u) && i_obj->IsWithinDistInMap(u, i_range) && i_minHpPct <= u->GetHealthPct() && u->GetHealthPct() <= i_maxHpPct && u->GetHealthPct() < i_hpPct)
+            {
+                i_hpPct = u->GetHealthPct();
+                return true;
+            }
+            return false;
+        }
+
+    private:
+        Unit const* i_obj;
+        float i_range;
+        float i_minHpPct, i_maxHpPct, i_hpPct;
+    };
+
     class FriendlyBelowHpPctEntryInRange
     {
         public:
@@ -825,6 +875,44 @@ namespace Trinity
             float i_range;
             uint8 i_pct;
             bool i_excludeSelf;
+    };
+
+    class MostHPMissingGroupInRange
+    {
+        public:
+            MostHPMissingGroupInRange(Unit const* obj, float range, uint32 hp) : i_obj(obj), i_range(range), i_hp(hp) { }
+
+            bool operator()(Unit* u)
+            {
+                if (i_obj == u)
+                    return false;
+
+                Player* player = nullptr;
+                if (u->GetTypeId() == TYPEID_PLAYER)
+                    player = u->ToPlayer();
+                else if (u->IsPet() && u->GetOwner())
+                    player = u->GetOwner()->ToPlayer();
+
+                if (!player)
+                    return false;
+
+                Group* group = player->GetGroup();
+                if (!group || !group->IsMember(i_obj->IsPet() ? i_obj->GetOwnerGUID() : i_obj->GetGUID()))
+                    return false;
+
+                if (u->IsAlive() && !i_obj->IsHostileTo(u) && i_obj->IsWithinDistInMap(u, i_range) && u->GetMaxHealth() - u->GetHealth() > i_hp)
+                {
+                    i_hp = u->GetMaxHealth() - u->GetHealth();
+                    return true;
+                }
+
+                return false;
+            }
+
+        private:
+            Unit const* i_obj;
+            float i_range;
+            uint32 i_hp;
     };
 
     class FriendlyCCedInRange
@@ -888,7 +976,7 @@ namespace Trinity
     class NearestAttackableNoTotemUnitInObjectRangeCheck
     {
         public:
-            NearestAttackableNoTotemUnitInObjectRangeCheck(WorldObject const* obj, Unit const* funit, float range) : i_obj(obj), i_funit(funit), i_range(range) { }
+            NearestAttackableNoTotemUnitInObjectRangeCheck(WorldObject const* obj, float range) : i_obj(obj), i_range(range) { }
 
             bool operator()(Unit* u)
             {
@@ -904,7 +992,7 @@ namespace Trinity
                 if (!u->isTargetableForAttack(false))
                     return false;
 
-                if (!i_obj->IsWithinDistInMap(u, i_range) || !i_funit->IsValidAttackTarget(u))
+                if (!i_obj->IsWithinDistInMap(u, i_range) || !i_obj->IsValidAttackTarget(u))
                     return false;
 
                 i_range = i_obj->GetDistance(*u);
@@ -913,7 +1001,6 @@ namespace Trinity
 
         private:
             WorldObject const* i_obj;
-            Unit const* i_funit;
             float i_range;
     };
 
@@ -1051,7 +1138,7 @@ namespace Trinity
 
             bool operator()(Unit* u) const
             {
-                // Check contains checks for: live, non-selectable, non-attackable flags, flight check and GM check, ignore totems
+                // Check contains checks for: live, uninteractible, non-attackable flags, flight check and GM check, ignore totems
                 if (u->GetTypeId() == TYPEID_UNIT && u->IsTotem())
                     return false;
 
@@ -1095,7 +1182,8 @@ namespace Trinity
                     return;
 
                 // too far
-                if (!u->IsWithinDistInMap(i_funit, i_range))
+                // Don't use combat reach distance, range must be an absolute value, otherwise the chain aggro range will be too big
+                if (!u->IsWithinDistInMap(i_funit, i_range, true, false, false))
                     return;
 
                 // only if see assisted creature's enemy
@@ -1181,7 +1269,7 @@ namespace Trinity
     class NearestHostileUnitInAggroRangeCheck
     {
         public:
-            explicit NearestHostileUnitInAggroRangeCheck(Creature const* creature, bool useLOS = false) : _me(creature), _useLOS(useLOS) { }
+            explicit NearestHostileUnitInAggroRangeCheck(Creature const* creature, bool useLOS = false, bool ignoreCivilians = false) : _me(creature), _useLOS(useLOS), _ignoreCivilians(ignoreCivilians) { }
 
             bool operator()(Unit* u) const
             {
@@ -1197,12 +1285,19 @@ namespace Trinity
                 if (_useLOS && !u->IsWithinLOSInMap(_me))
                     return false;
 
+                // pets in aggressive do not attack civilians
+                if (_ignoreCivilians)
+                    if (Creature* c = u->ToCreature())
+                        if (c->IsCivilian())
+                            return false;
+
                 return true;
             }
 
         private:
             Creature const* _me;
             bool _useLOS;
+            bool _ignoreCivilians;
             NearestHostileUnitInAggroRangeCheck(NearestHostileUnitInAggroRangeCheck const&) = delete;
     };
 
@@ -1221,7 +1316,8 @@ namespace Trinity
                     return false;
 
                 // too far
-                if (!i_funit->IsWithinDistInMap(u, i_range))
+                // Don't use combat reach distance, range must be an absolute value, otherwise the chain aggro range will be too big
+                if (!i_funit->IsWithinDistInMap(u, i_range, true, false, false))
                     return false;
 
                 // only if see assisted creature
@@ -1250,7 +1346,8 @@ namespace Trinity
                 if (!u->CanAssistTo(i_obj, i_enemy))
                     return false;
 
-                if (!i_obj->IsWithinDistInMap(u, i_range))
+                // Don't use combat reach distance, range must be an absolute value, otherwise the chain aggro range will be too big
+                if (!i_obj->IsWithinDistInMap(u, i_range, true, false, false))
                     return false;
 
                 if (!i_obj->IsWithinLOSInMap(u))
