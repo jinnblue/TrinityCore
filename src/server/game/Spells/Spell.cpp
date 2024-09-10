@@ -3933,7 +3933,7 @@ void Spell::finish(bool ok)
         Unit::AuraEffectList const& vIgnoreReset = unitCaster->GetAuraEffectsByType(SPELL_AURA_IGNORE_MELEE_RESET);
         for (Unit::AuraEffectList::const_iterator i = vIgnoreReset.begin(); i != vIgnoreReset.end(); ++i)
         {
-            if ((*i)->IsAffectedOnSpell(m_spellInfo))
+            if ((*i)->IsAffectingSpell(m_spellInfo))
             {
                 found = true;
                 break;
@@ -5211,7 +5211,7 @@ SpellCastResult Spell::CheckCast(bool strict, uint32* param1 /*= nullptr*/, uint
             Unit::AuraEffectList const& ignore = unitCaster->GetAuraEffectsByType(SPELL_AURA_MOD_IGNORE_SHAPESHIFT);
             for (AuraEffect const* aurEff : ignore)
             {
-                if (!aurEff->IsAffectedOnSpell(m_spellInfo))
+                if (!aurEff->IsAffectingSpell(m_spellInfo))
                     continue;
 
                 checkForm = false;
@@ -5237,7 +5237,7 @@ SpellCastResult Spell::CheckCast(bool strict, uint32* param1 /*= nullptr*/, uint
         Unit::AuraEffectList const& stateAuras = unitCaster->GetAuraEffectsByType(SPELL_AURA_ABILITY_IGNORE_AURASTATE);
         for (Unit::AuraEffectList::const_iterator j = stateAuras.begin(); j != stateAuras.end(); ++j)
         {
-            if ((*j)->IsAffectedOnSpell(m_spellInfo))
+            if ((*j)->IsAffectingSpell(m_spellInfo))
             {
                 m_needComboPoints = false;
                 if ((*j)->GetMiscValue() == 1)
@@ -8099,23 +8099,37 @@ void Spell::CallScriptDestinationTargetSelectHandlers(SpellDestination& target, 
 
 bool Spell::CheckScriptEffectImplicitTargets(uint32 effIndex, uint32 effIndexToCheck)
 {
-    // Skip if there are not any script
-    if (m_loadedScripts.empty())
-        return true;
-
-    for (auto itr = m_loadedScripts.begin(); itr != m_loadedScripts.end(); ++itr)
+    auto allEffectTargetScriptsAreShared = []<typename HookType>(HookList<HookType>& hooks, SpellInfo const* spellInfo, uint32 effIndex, uint32 effIndexToCheck)
     {
-        auto targetSelectHookEnd = (*itr)->OnObjectTargetSelect.end(), targetSelectHookItr = (*itr)->OnObjectTargetSelect.begin();
-        for (; targetSelectHookItr != targetSelectHookEnd; ++targetSelectHookItr)
-            if (((*targetSelectHookItr).IsEffectAffected(m_spellInfo, effIndex) && !(*targetSelectHookItr).IsEffectAffected(m_spellInfo, effIndexToCheck)) ||
-                (!(*targetSelectHookItr).IsEffectAffected(m_spellInfo, effIndex) && (*targetSelectHookItr).IsEffectAffected(m_spellInfo, effIndexToCheck)))
-                return false;
+        for (HookType& hook : hooks)
+        {
+            if (!hook.IsEffectAffected(spellInfo, effIndex))
+                continue;
 
-        auto areaTargetSelectHookEnd = (*itr)->OnObjectAreaTargetSelect.end(), areaTargetSelectHookItr = (*itr)->OnObjectAreaTargetSelect.begin();
-        for (; areaTargetSelectHookItr != areaTargetSelectHookEnd; ++areaTargetSelectHookItr)
-            if (((*areaTargetSelectHookItr).IsEffectAffected(m_spellInfo, effIndex) && !(*areaTargetSelectHookItr).IsEffectAffected(m_spellInfo, effIndexToCheck)) ||
-                (!(*areaTargetSelectHookItr).IsEffectAffected(m_spellInfo, effIndex) && (*areaTargetSelectHookItr).IsEffectAffected(m_spellInfo, effIndexToCheck)))
+            bool otherEffectHasSameTargetFunction = std::ranges::any_of(hooks, [&](HookType& other)
+            {
+                return other.IsEffectAffected(spellInfo, effIndexToCheck) && hook.HasSameTargetFunctionAs(other);
+            });
+            if (!otherEffectHasSameTargetFunction)
                 return false;
+        }
+
+        return true;
+    };
+
+    for (SpellScript* script : m_loadedScripts)
+    {
+        if (!allEffectTargetScriptsAreShared(script->OnObjectTargetSelect, m_spellInfo, effIndex, effIndexToCheck))
+            return false;
+
+        if (!allEffectTargetScriptsAreShared(script->OnObjectTargetSelect, m_spellInfo, effIndexToCheck, effIndex))
+            return false;
+
+        if (!allEffectTargetScriptsAreShared(script->OnObjectAreaTargetSelect, m_spellInfo, effIndex, effIndexToCheck))
+            return false;
+
+        if (!allEffectTargetScriptsAreShared(script->OnObjectAreaTargetSelect, m_spellInfo, effIndexToCheck, effIndex))
+            return false;
     }
     return true;
 }
@@ -8144,7 +8158,7 @@ void Spell::PrepareTriggersExecutedOnHit()
     Unit::AuraEffectList const& targetTriggers = unitCaster->GetAuraEffectsByType(SPELL_AURA_ADD_TARGET_TRIGGER);
     for (AuraEffect const* aurEff : targetTriggers)
     {
-        if (!aurEff->IsAffectedOnSpell(m_spellInfo))
+        if (!aurEff->IsAffectingSpell(m_spellInfo))
             continue;
 
         SpellInfo const* auraSpellInfo = aurEff->GetSpellInfo();
